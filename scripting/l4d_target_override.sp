@@ -1,6 +1,6 @@
 /*
 *	Target Override
-*	Copyright (C) 2025 Silvers
+*	Copyright (C) 2026 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.30"
+#define PLUGIN_VERSION 		"2.31"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark only (for command). 2=Benchmark (displays on server). 3=PrintToServer various data.
 
 /*======================================================================================
@@ -32,6 +32,11 @@
 
 ========================================================================================
 	Change Log:
+
+2.31 (14-Mar-2026)
+	- Added command "sm_to_option" to get or set special infected target options, identical to the current get and set option natives.
+	- Added option "rescue" to block targeting those in a rescue vehicle. Requested by "Jedrickx".
+	- Plugin, data config and scripting include file updated.
 
 2.30 (21-Mar-2025)
 	- L4D2: Plugin no longer throws error if the patch is already applied.
@@ -239,8 +244,11 @@
 
 
 // Left4DHooks natives - optional - (added here to avoid requiring Left4DHooks include)
+#define NAV_SPAWN_RESCUE_VEHICLE 32768
+native int L4D_GetNavArea_SpawnAttributes(Address pTerrorNavArea);
 native float L4D2Direct_GetFlowDistance(int client);
 native Address L4D2Direct_GetTerrorNavArea(const float pos[3], float beneathLimit = 120.0);
+native int L4D_NavArea_GetAdjacentAreas(Address area, int direction, ArrayList list);
 native float L4D2Direct_GetTerrorNavAreaFlow(Address pTerrorNavArea);
 native int L4D_GetHighestFlowSurvivor();
 native bool L4D_IsInFirstCheckpoint(int client);
@@ -261,6 +269,7 @@ float g_iBenchTicks;
 #define CVAR_FLAGS			FCVAR_NOTIFY
 #define GAMEDATA			"l4d_target_override"
 #define CONFIG_DATA			"data/l4d_target_override.cfg"
+
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarForward, g_hCvarSpecials, g_hCvarTeam, g_hCvarType, g_hCvarDecay, g_hCvarBlind, g_hCvarLimp;
 bool g_bCvarAllow, g_bMapStarted, g_bLateLoad, g_bLeft4Dead2, g_bLeft4DHooks, g_bActions, g_bCvarBlind, g_bCvarForward;
@@ -292,6 +301,8 @@ int g_iOptionMini[MAX_SPECIAL];
 int g_iOptionVoms[MAX_SPECIAL];
 int g_iOptionVoms2[MAX_SPECIAL];
 int g_iOptionSafe[MAX_SPECIAL];
+int g_iOptionResc[MAX_SPECIAL];
+int g_iOptionResX[MAX_SPECIAL];
 int g_iOptionTarg[MAX_SPECIAL];
 float g_fOptionRange[MAX_SPECIAL];
 float g_fOptionDist[MAX_SPECIAL];
@@ -359,8 +370,10 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		return APLRes_SilentFailure;
 	}
 
+	MarkNativeAsOptional("L4D_GetNavArea_SpawnAttributes");
 	MarkNativeAsOptional("L4D2Direct_GetFlowDistance");
 	MarkNativeAsOptional("L4D2Direct_GetTerrorNavArea");
+	MarkNativeAsOptional("L4D_NavArea_GetAdjacentAreas");
 	MarkNativeAsOptional("L4D2Direct_GetTerrorNavAreaFlow");
 	MarkNativeAsOptional("L4D_GetHighestFlowSurvivor");
 
@@ -495,6 +508,7 @@ public void OnPluginStart()
 	// COMMANDS
 	// =========================
 	RegAdminCmd("sm_to_reload",		CmdReload,	ADMFLAG_ROOT, "Reloads the data config.");
+	RegAdminCmd("sm_to_option",		CmdOption,	ADMFLAG_ROOT, "Usage: sm_to_option <TARGET_SI_INDEX> <TARGET_OPTION_INDEX> [value]. Get or set option values (see include for details).");
 
 	#if DEBUG_BENCHMARK == 1 || DEBUG_BENCHMARK == 2
 	RegAdminCmd("sm_to_stats",		CmdStats,	ADMFLAG_ROOT, "Displays benchmarking stats (min/avg/max).");
@@ -554,6 +568,108 @@ Action CmdReload(int client, int args)
 {
 	OnMapStart();
 	ReplyToCommand(client, "Target Override: Data config reloaded.");
+	return Plugin_Handled;
+}
+
+Action CmdOption(int client, int args)
+{
+	if( args < 2 )
+	{
+		ReplyToCommand(client, "[Target Override] Usage: sm_to_option <SI TARGET_SI_INDEX> <TARGET_OPTION_INDEX> [value]. Get or set option values (see include for details)");
+		return Plugin_Handled;
+	}
+
+	char sSpecial[10];
+	char sOption[10];
+
+	// Get Special index
+	GetCmdArg(1, sSpecial, sizeof(sSpecial));
+	int special = StringToInt(sSpecial);
+
+	if( special < 0 || special > 6 )
+	{
+		ReplyToCommand(client, "[Target Override]: Invalid TARGET_SI_INDEX. 0=Tank, 1=Smoker, 2=Boomer, 3=Hunter, 4=Spitter, 5=Jockey, 6=Charger.");
+		return Plugin_Handled;
+	}
+
+	// Get Option index
+	GetCmdArg(2, sOption, sizeof(sOption));
+	int option = StringToInt(sOption);
+
+	if( option < 0 || option > 12 )
+	{
+		ReplyToCommand(client, "[Target Override]: Invalid TARGET_OPTION_INDEX. 0=pinned, 1=incap, 2=voms, 3=voms2, 4=range, 5=dist, 6=wait, 7=last, 8=time, 9=safe, 10=targeted, 11=rescue, 12=rescuex.");
+		return Plugin_Handled;
+	}
+
+	// Get Value (optional)
+	any value;
+	if( args == 3 )
+	{
+		GetCmdArg(3, sOption, sizeof(sOption));
+
+		switch( view_as<TARGET_OPTION_INDEX>(option) )
+		{
+			case INDEX_PINNED, INDEX_INCAP, INDEX_VOMS, INDEX_VOMS2, INDEX_LAST, INDEX_SAFE, INDEX_TARGETED, INDEX_RESCUE, INDEX_RESCUEX:
+			{
+				value = StringToInt(sOption);
+			}
+			case INDEX_RANGE, INDEX_DIST, INDEX_WAIT, INDEX_TIME:
+			{
+				value = StringToFloat(sOption);
+			}
+		}
+	}
+
+	switch( view_as<TARGET_SI_INDEX>(special) )
+	{
+		case SI_TANK:			sSpecial = "Tank";
+		case SI_SMOKER:			sSpecial = "Smoker";
+		case SI_BOOMER:			sSpecial = "Boomer";
+		case SI_HUNTER:			sSpecial = "Hunter";
+		case SI_SPITTER:		sSpecial = "Spitter";
+		case SI_JOCKEY:			sSpecial = "Jockey";
+		case SI_CHARGER:		sSpecial = "Charger";
+	}
+
+	switch( view_as<TARGET_OPTION_INDEX>(option) )
+	{
+		case INDEX_PINNED:		sOption = "pinned";
+		case INDEX_INCAP:		sOption = "incap";
+		case INDEX_VOMS:		sOption = "voms";
+		case INDEX_VOMS2:		sOption = "voms2";
+		case INDEX_RANGE:		sOption = "range";
+		case INDEX_DIST:		sOption = "dist";
+		case INDEX_WAIT:		sOption = "wait";
+		case INDEX_LAST:		sOption = "last";
+		case INDEX_TIME:		sOption = "time";
+		case INDEX_SAFE:		sOption = "safe";
+		case INDEX_TARGETED:	sOption = "targeted";
+		case INDEX_RESCUE:		sOption = "rescue";
+		case INDEX_RESCUEX:		sOption = "rescuex";
+	}
+
+	if( args == 2 )
+	{
+		value = GetOption(view_as<TARGET_SI_INDEX>(special), view_as<TARGET_OPTION_INDEX>(option));
+		switch( view_as<TARGET_OPTION_INDEX>(option) )
+		{
+			case INDEX_RANGE, INDEX_DIST, INDEX_WAIT, INDEX_TIME:
+			{
+				ReplyToCommand(client, "[Target Override]: Special \"%s\" option \"%s\" is \"%f\"", sSpecial, sOption, value);
+			}
+			default:
+			{
+				ReplyToCommand(client, "[Target Override]: Special \"%s\" option \"%s\" is \"%d\"", sSpecial, sOption, value);
+			}
+		}
+	}
+	else
+	{
+		SetOption(view_as<TARGET_SI_INDEX>(special), view_as<TARGET_OPTION_INDEX>(option), value);
+		ReplyToCommand(client, "[Target Override]: Special \"%s\" option \"%s\" set to \"%d\"", sSpecial, sOption, value);
+	}
+
 	return Plugin_Handled;
 }
 
@@ -617,6 +733,8 @@ void ExplodeToArray(char[] key, KeyValues hFile, int index, int arr[MAX_ORDERS])
 		g_iOptionLast[index] = hFile.GetNum("last");
 		g_fOptionLast[index] = hFile.GetFloat("time");
 		g_iOptionSafe[index] = hFile.GetNum("safe");
+		g_iOptionResc[index] = hFile.GetNum("rescue");
+		g_iOptionResX[index] = hFile.GetNum("rescuex");
 		g_iOptionTarg[index] = hFile.GetNum("targeted");
 		hFile.Rewind();
 	}
@@ -1614,6 +1732,54 @@ MRESReturn ChooseVictim(int attacker, Handle hReturn)
 
 
 			// =========================
+			// OPTION: "rescue"
+			// =========================
+			if( g_iOptionResc[class] )
+			{
+				float vArea[3];
+				GetClientAbsOrigin(victim, vArea);
+
+				Address navarea = L4D2Direct_GetTerrorNavArea(vArea);
+
+				if( g_iOptionResX[class] == 0 )
+				{
+					if( navarea && L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE ) continue;
+				}
+				else
+				{
+					// Get adjacent areas:
+					ArrayList aList;
+					bool found;
+					int count;
+
+					for( int x = 0; x < 4; x++ )
+					{
+						aList = new ArrayList();
+						count = L4D_NavArea_GetAdjacentAreas(navarea, x, aList);
+
+						for( int a = 0; a < count; a++ )
+						{
+							navarea = aList.Get(a);
+							if( navarea && L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE )
+							{
+								found = true;
+								delete aList;
+								break;
+							}
+						}
+
+						delete aList;
+
+						if( found ) break;
+					}
+
+					if( found ) continue;
+				}
+			}
+
+
+
+			// =========================
 			// OPTION: "pinned"
 			// =========================
 			if( g_iOptionPinned[class] )
@@ -2289,7 +2455,12 @@ any Native_GetOption(Handle plugin, int numParams)
 	int index = GetNativeCell(1);
 	int option = GetNativeCell(2);
 
-	switch( view_as<TARGET_OPTION_INDEX>(option) )
+	return GetOption(view_as<TARGET_SI_INDEX>(index), view_as<TARGET_OPTION_INDEX>(option));
+}
+
+any GetOption(TARGET_SI_INDEX index, TARGET_OPTION_INDEX option)
+{
+	switch( option )
 	{
 		case INDEX_PINNED:		return g_iOptionPinned[index];
 		case INDEX_INCAP:		return g_iOptionIncap[index];
@@ -2302,6 +2473,8 @@ any Native_GetOption(Handle plugin, int numParams)
 		case INDEX_TIME:		return g_fOptionLast[index];
 		case INDEX_SAFE:		return g_iOptionSafe[index];
 		case INDEX_TARGETED:	return g_iOptionTarg[index];
+		case INDEX_RESCUE:		return g_iOptionResc[index];
+		case INDEX_RESCUEX:		return g_iOptionResX[index];
 	}
 
 	return -1;
@@ -2313,7 +2486,14 @@ int Native_SetOption(Handle plugin, int numParams)
 	int option = GetNativeCell(2);
 	any value = GetNativeCell(3);
 
-	switch( view_as<TARGET_OPTION_INDEX>(option) )
+	SetOption(view_as<TARGET_SI_INDEX>(index), view_as<TARGET_OPTION_INDEX>(option), value);
+
+	return 0;
+}
+
+void SetOption(TARGET_SI_INDEX index, TARGET_OPTION_INDEX option, any value)
+{
+	switch( option )
 	{
 		case INDEX_PINNED:		g_iOptionPinned[index] = value;
 		case INDEX_INCAP:		g_iOptionIncap[index] = value;
@@ -2326,9 +2506,9 @@ int Native_SetOption(Handle plugin, int numParams)
 		case INDEX_TIME:		g_fOptionLast[index] = value;
 		case INDEX_SAFE:		g_iOptionSafe[index] = value;
 		case INDEX_TARGETED:	g_iOptionTarg[index] = value;
+		case INDEX_RESCUE:		g_iOptionResc[index] = value;
+		case INDEX_RESCUEX:		g_iOptionResX[index] = value;
 	}
-
-	return 0;
 }
 
 Action SendForward(int attacker, int &victim, int order)

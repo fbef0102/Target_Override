@@ -1,6 +1,6 @@
 /*
 *	Target Override
-*	Copyright (C) 2022 Silvers
+*	Copyright (C) 2026 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@ public void __pl_target_override_SetNTVOptional()
 
 
 
-// The client Values used that can be retrieved:
+// The client values used that can be retrieved:
 enum VALUE_OPTION_INDEX
 {
 	VALUE_INDEX_VICTIM		= 0,	// (int)	- The attackers last client being targeted
@@ -53,7 +53,7 @@ enum VALUE_OPTION_INDEX
 	VALUE_INDEX_ATTACK		= 2,	// (float)	- Time since last damage to a client
 	VALUE_INDEX_ATTACKER	= 3,	// (int)	- Last client to damage the attacker
 	VALUE_INDEX_ORDER		= 4,	// (int)	- The attackers last targeting "order" used
-	VALUE_INDEX_TOTAL		= 5,	// (int)	- Total number of SI targeting the client when "targeted" is active
+	VALUE_INDEX_TOTAL		= 5		// (int)	- Total number of SI targeting the client when "targeted" is active
 }
 
 // The Special Infected Values used for the natives:
@@ -68,7 +68,7 @@ enum TARGET_SI_INDEX
 	SI_CHARGER		= 6		// Charger
 }
 
-// The options Values used for the natives:
+// The option values used for the natives:
 enum TARGET_OPTION_INDEX
 {
 	INDEX_PINNED	= 0,	// (int)	- "pinned"
@@ -82,6 +82,8 @@ enum TARGET_OPTION_INDEX
 	INDEX_TIME		= 8,	// (float)	- "time"
 	INDEX_SAFE		= 9,	// (int)	- "safe"
 	INDEX_TARGETED	= 10,	// (int)	- "targeted"
+	INDEX_RESCUE	= 11,	// (int)	- "rescue"
+	INDEX_RESCUEX	= 12	// (int)	- "rescuex"
 }
 
 
