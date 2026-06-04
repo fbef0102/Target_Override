@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.31"
+#define PLUGIN_VERSION 		"2.32"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark only (for command). 2=Benchmark (displays on server). 3=PrintToServer various data.
 
 /*======================================================================================
@@ -32,6 +32,12 @@
 
 ========================================================================================
 	Change Log:
+
+2.32 (04-Jun-2026)
+	- Added option "22" to target Survivors who molotov or bile bombed the attacker. Requested by "".
+	- Added option "23" to target Survivors holding a specific weapon. Requested by "".
+	- Fixed a memory leak when the forward blocks attacking someone.
+	- Plugin, data config and scripting include file updated.
 
 2.31 (14-Mar-2026)
 	- Added command "sm_to_option" to get or set special infected target options, identical to the current get and set option natives.
@@ -235,24 +241,12 @@
 #include <sdkhooks>
 #include <sdktools>
 #include <dhooks>
+#include <left4dhooks>
 #include <l4d_target_override>
 
 #undef REQUIRE_EXTENSIONS
 #tryinclude <actions>
 #define REQUIRE_EXTENSIONS
-
-
-
-// Left4DHooks natives - optional - (added here to avoid requiring Left4DHooks include)
-#define NAV_SPAWN_RESCUE_VEHICLE 32768
-native int L4D_GetNavArea_SpawnAttributes(Address pTerrorNavArea);
-native float L4D2Direct_GetFlowDistance(int client);
-native Address L4D2Direct_GetTerrorNavArea(const float pos[3], float beneathLimit = 120.0);
-native int L4D_NavArea_GetAdjacentAreas(Address area, int direction, ArrayList list);
-native float L4D2Direct_GetTerrorNavAreaFlow(Address pTerrorNavArea);
-native int L4D_GetHighestFlowSurvivor();
-native bool L4D_IsInFirstCheckpoint(int client);
-native bool L4D_IsInLastCheckpoint(int client);
 
 
 
@@ -272,7 +266,7 @@ float g_iBenchTicks;
 
 
 ConVar g_hCvarAllow, g_hCvarMPGameMode, g_hCvarModes, g_hCvarModesOff, g_hCvarModesTog, g_hCvarForward, g_hCvarSpecials, g_hCvarTeam, g_hCvarType, g_hCvarDecay, g_hCvarBlind, g_hCvarLimp;
-bool g_bCvarAllow, g_bMapStarted, g_bLateLoad, g_bLeft4Dead2, g_bLeft4DHooks, g_bActions, g_bCvarBlind, g_bCvarForward;
+bool g_bCvarAllow, g_bMapStarted, g_bLateLoad, g_bLeft4Dead2, g_bLeft4DHooks, g_bActions, g_bWatchFire, g_bCvarBlind, g_bCvarForward;
 int g_iCvarSpecials, g_iCvarTeam, g_iCvarType, g_iClassTank;
 float g_fCvarDecay, g_fCvarLimp;
 Handle g_hDetour, g_hForward;
@@ -304,10 +298,12 @@ int g_iOptionSafe[MAX_SPECIAL];
 int g_iOptionResc[MAX_SPECIAL];
 int g_iOptionResX[MAX_SPECIAL];
 int g_iOptionTarg[MAX_SPECIAL];
+int g_iOptionBomb[MAX_SPECIAL];
 float g_fOptionRange[MAX_SPECIAL];
 float g_fOptionDist[MAX_SPECIAL];
 float g_fOptionLast[MAX_SPECIAL];
 float g_fOptionWait[MAX_SPECIAL];
+char g_sWeaponTarget[MAX_SPECIAL][1024];
 
 #define MAX_PLAY		MAXPLAYERS+1
 float g_fTotalDamage[MAX_PLAY][MAX_PLAY];
@@ -316,6 +312,8 @@ float g_fLastAttack[MAX_PLAY];
 int g_iLastAttacker[MAX_PLAY];
 int g_iLastOrders[MAX_PLAY];
 int g_iLastVictim[MAX_PLAY];
+int g_iLastBombBile[MAX_PLAY];
+int g_iLastBombFire[MAX_PLAY];
 bool g_bIncapped[MAX_PLAY];
 bool g_bLedgeGrab[MAX_PLAY];
 bool g_bPinBoomer[MAX_PLAY];
@@ -325,6 +323,14 @@ bool g_bPinJockey[MAX_PLAY];
 bool g_bPinCharger[MAX_PLAY];
 bool g_bPumCharger[MAX_PLAY];
 bool g_bCheckpoint[MAX_PLAY];
+
+int g_iInferno[2048+1];
+
+enum
+{
+	TYPE_FIRE = (1 << 0),
+	TYPE_BILE = (1 << 1)
+}
 
 enum
 {
@@ -610,7 +616,7 @@ Action CmdOption(int client, int args)
 
 		switch( view_as<TARGET_OPTION_INDEX>(option) )
 		{
-			case INDEX_PINNED, INDEX_INCAP, INDEX_VOMS, INDEX_VOMS2, INDEX_LAST, INDEX_SAFE, INDEX_TARGETED, INDEX_RESCUE, INDEX_RESCUEX:
+			case INDEX_PINNED, INDEX_INCAP, INDEX_VOMS, INDEX_VOMS2, INDEX_LAST, INDEX_SAFE, INDEX_TARGETED, INDEX_RESCUE, INDEX_RESCUEX, INDEX_BOMBED:
 			{
 				value = StringToInt(sOption);
 			}
@@ -647,6 +653,7 @@ Action CmdOption(int client, int args)
 		case INDEX_TARGETED:	sOption = "targeted";
 		case INDEX_RESCUE:		sOption = "rescue";
 		case INDEX_RESCUEX:		sOption = "rescuex";
+		case INDEX_BOMBED:		sOption = "bombed";
 	}
 
 	if( args == 2 )
@@ -736,6 +743,14 @@ void ExplodeToArray(char[] key, KeyValues hFile, int index, int arr[MAX_ORDERS])
 		g_iOptionResc[index] = hFile.GetNum("rescue");
 		g_iOptionResX[index] = hFile.GetNum("rescuex");
 		g_iOptionTarg[index] = hFile.GetNum("targeted");
+		g_iOptionBomb[index] = hFile.GetNum("bombed");
+
+		hFile.GetString("weapon", g_sWeaponTarget[index], sizeof(g_sWeaponTarget[]));
+		if( g_sWeaponTarget[index][0] )
+		{
+			Format(g_sWeaponTarget[index], sizeof(g_sWeaponTarget[]), ",%s,", g_sWeaponTarget[index]);
+		}
+
 		hFile.Rewind();
 	}
 }
@@ -935,6 +950,8 @@ public void OnClientDisconnect(int client)
 		if( g_iLastVictim[i] == client )
 		{
 			g_iLastVictim[i] = 0;
+			g_iLastBombBile[i] = 0;
+			g_iLastBombFire[i] = 0;
 		}
 	}
 
@@ -956,16 +973,23 @@ void Event_PlayerReplace(Event event, const char[] name, bool dontBroadcast)
 	int bot = GetClientOfUserId(GetEventInt(event, "bot"));
 	int player = GetClientOfUserId(GetEventInt(event, "player"));
 
-	g_bCheckpoint[bot]	= g_bCheckpoint[player];
-	g_bIncapped[bot] 	= g_bIncapped[player];
-	g_bLedgeGrab[bot]	= g_bLedgeGrab[player];
-	g_bPinSmoker[bot]	= g_bPinSmoker[player];
-	g_bPinHunter[bot]	= g_bPinHunter[player];
+	g_bCheckpoint[bot]		= g_bCheckpoint[player];
+	g_bIncapped[bot] 		= g_bIncapped[player];
+	g_bLedgeGrab[bot]		= g_bLedgeGrab[player];
+	g_bPinSmoker[bot]		= g_bPinSmoker[player];
+	g_bPinHunter[bot]		= g_bPinHunter[player];
+
 	if( g_bLeft4Dead2 )
 	{
 		g_bPinJockey[bot]	= g_bPinJockey[player];
 		g_bPinCharger[bot]	= g_bPinCharger[player];
 		g_bPumCharger[bot]	= g_bPumCharger[player];
+	}
+
+	for( int i = 1; i <= MaxClients; i++ )
+	{
+		if( g_iLastBombBile[i] == player ) g_iLastBombBile[i] = bot;
+		if( g_iLastBombFire[i] == player ) g_iLastBombFire[i] = bot;
 	}
 }
 
@@ -979,11 +1003,18 @@ void Event_BotReplace(Event event, const char[] name, bool dontBroadcast)
 	g_bLedgeGrab[player]	= g_bLedgeGrab[bot];
 	g_bPinSmoker[player]	= g_bPinSmoker[bot];
 	g_bPinHunter[player]	= g_bPinHunter[bot];
+
 	if( g_bLeft4Dead2 )
 	{
 		g_bPinJockey[player]	= g_bPinJockey[bot];
 		g_bPinCharger[player]	= g_bPinCharger[bot];
 		g_bPumCharger[player]	= g_bPumCharger[bot];
+	}
+
+	for( int i = 1; i <= MaxClients; i++ )
+	{
+		if( g_iLastBombBile[i] == bot ) g_iLastBombBile[i] = player;
+		if( g_iLastBombFire[i] == bot ) g_iLastBombFire[i] = player;
 	}
 }
 
@@ -993,7 +1024,7 @@ void HookPlayerHurt(bool doHook)
 	bool hook;
 	for( int i = 0; i < MAX_SPECIAL; i++ )
 	{
-		if( g_iOptionLast[i] )
+		if( g_iOptionLast[i] || g_iOptionBomb[i] & TYPE_FIRE )
 		{
 			hook = true;
 			break;
@@ -1025,6 +1056,8 @@ void ResetVars(int client)
 	g_iLastAttacker[client] = 0;
 	g_iLastOrders[client] = 0;
 	g_iLastVictim[client] = 0;
+	g_iLastBombBile[client] = 0;
+	g_iLastBombFire[client] = 0;
 	g_fLastSwitch[client] = 0.0;
 	g_fLastAttack[client] = 0.0;
 	g_bIncapped[client] = false;
@@ -1054,6 +1087,18 @@ void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast)
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	ResetVars(client);
+
+	if( GetClientTeam(client) == 3 )
+	{
+		int class = GetEntProp(client, Prop_Send, "m_zombieClass");
+		if( class == g_iClassTank ) class = 0;
+
+		// Molotov bombed
+		if( g_iOptionBomb[class] & TYPE_FIRE )
+		{
+			SDKHook(client, SDKHook_OnTakeDamageAlivePost, OnTakeDamage);
+		}
+	}
 }
 
 void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
@@ -1065,15 +1110,16 @@ void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 
 	if( client )
 	{
+		SDKUnhook(client, SDKHook_OnTakeDamage, OnTakeDamage);
+
 		for( int i = 1; i <= MaxClients; i++ )
 		{
 			g_fTotalDamage[i][client] = 0.0;
 			g_fTotalDamage[client][i] = 0.0;
 
-			if( g_iLastVictim[i] == client )
-			{
-				g_iLastVictim[i] = 0;
-			}
+			if( g_iLastVictim[i] == client ) g_iLastVictim[i] = 0;
+			if( g_iLastBombBile[i] == client ) g_iLastBombBile[i] = 0;
+			if( g_iLastBombFire[i] == client ) g_iLastBombFire[i] = 0;
 		}
 	}
 }
@@ -1089,7 +1135,8 @@ void Event_PlayerHurt(Event event, const char[] name, bool dontBroadcast)
 			int class = GetEntProp(client, Prop_Send, "m_zombieClass");
 			if( class == g_iClassTank ) class = 0;
 
-			if( g_fLastAttack[client] + g_fOptionLast[class] > GetGameTime() )
+			// Last attacker
+			if( g_iOptionLast[class] && g_fLastAttack[client] + g_fOptionLast[class] > GetGameTime() )
 			{
 				int type = event.GetInt("type");
 
@@ -1473,7 +1520,7 @@ MRESReturn ChooseVictim(int attacker, Handle hReturn)
 		if( victim && IsPlayerAlive(victim) )
 		{
 			team = ValidateTeam(victim);
-			// Option "voms2" then allow attacking vomited survivors ELSE not vomited
+			// Option "voms2" then allow attacking vomited survivors else not vomited
 			// Option "voms" then allow choosing team 3 when vomited
 			if( (team == 2 && (g_iOptionVoms2[class] == 1 || g_bPinBoomer[victim] == false) ) ||
 				(team == 3 && g_iOptionVoms[class] == 1 && g_bPinBoomer[victim] == true) )
@@ -1680,8 +1727,8 @@ MRESReturn ChooseVictim(int attacker, Handle hReturn)
 
 
 
-		// Last Attacker enabled?
-		if( order == 7 && g_iOptionLast[class] == 0 ) continue;
+		if( order == 7 && g_iOptionLast[class] == 0 ) continue; // Last Attacker enabled?
+		if( order == 23 && g_sWeaponTarget[class][0] == 0 ) continue; // Holding weapon enabled?
 
 
 
@@ -1973,7 +2020,11 @@ MRESReturn ChooseVictim(int attacker, Handle hReturn)
 	if( newVictim )
 	{
 		Action aResult = SendForward(attacker, newVictim, g_iLastOrders[attacker]);
-		if( aResult == Plugin_Handled ) return MRES_Ignored;
+		if( aResult == Plugin_Handled )
+		{
+			delete aTargets;
+			return MRES_Ignored;
+		}
 
 		DHookSetReturn(hReturn, newVictim);
 
@@ -2403,6 +2454,71 @@ int OrderTest(int attacker, int victim, int team, int class, int order)
 				#endif
 			}
 		}
+
+		// 22=Molotov/bile bombed victim
+		case 22:
+		{
+			// Validate on fire
+			if( g_iOptionBomb[class] & TYPE_FIRE && g_iLastBombFire[attacker] == victim )
+			{
+				if( GetEntityFlags(attacker) & FL_ONFIRE )
+				{
+					newVictim = victim;
+
+					#if DEBUG_BENCHMARK == 3
+					PrintToServer("Break order 22 (Molotov)");
+					#endif
+				}
+				else
+				{
+					g_iLastBombFire[attacker] = 0;
+				}
+			}
+			else
+			{
+				// Validate biled
+				if(	g_iOptionBomb[class] & TYPE_BILE && g_iLastBombBile[attacker] == victim )
+				{
+					if( GetEntPropFloat(attacker, Prop_Send, "m_itTimer", 1) > GetGameTime() )
+					{
+						newVictim = victim;
+
+						#if DEBUG_BENCHMARK == 3
+						PrintToServer("Break order 22 (Bilejar)");
+						#endif
+					}
+					else
+					{
+						g_iLastBombBile[attacker] = 0;
+					}
+				}
+			}
+		}
+
+		// 23=Target holding specific "weapon" entity
+		case 23:
+		{
+			// Get victim weapon
+			int weapon = GetEntPropEnt(victim, Prop_Send, "m_hActiveWeapon");
+			if( weapon != -1 )
+			{
+				static char sWeapon[32];
+
+				// Format ",<class>," for searching
+				GetEdictClassname(weapon, sWeapon, sizeof(sWeapon));
+				Format(sWeapon, sizeof(sWeapon), ",%s,", sWeapon[7]);
+
+				// Match weapon from comma separated list
+				if( StrContains(g_sWeaponTarget[class], sWeapon) == 0 )
+				{
+					newVictim = victim;
+
+					#if DEBUG_BENCHMARK == 3
+					PrintToServer("Break order 23 (%s)", sWeapon);
+					#endif
+				}
+			}
+		}
 	}
 
 	// Ignore players using a minigun if not checking for that
@@ -2475,6 +2591,7 @@ any GetOption(TARGET_SI_INDEX index, TARGET_OPTION_INDEX option)
 		case INDEX_TARGETED:	return g_iOptionTarg[index];
 		case INDEX_RESCUE:		return g_iOptionResc[index];
 		case INDEX_RESCUEX:		return g_iOptionResX[index];
+		case INDEX_BOMBED:		return g_iOptionBomb[index];
 	}
 
 	return -1;
@@ -2508,6 +2625,7 @@ void SetOption(TARGET_SI_INDEX index, TARGET_OPTION_INDEX option, any value)
 		case INDEX_TARGETED:	g_iOptionTarg[index] = value;
 		case INDEX_RESCUE:		g_iOptionResc[index] = value;
 		case INDEX_RESCUEX:		g_iOptionResX[index] = value;
+		case INDEX_BOMBED:		g_iOptionBomb[index] = value;
 	}
 }
 
@@ -2531,6 +2649,57 @@ Action SendForward(int attacker, int &victim, int order)
 	}
 
 	return Plugin_Continue;
+}
+
+
+
+// ====================================================================================================
+//					For the "bombed" option:
+// ====================================================================================================
+public void OnEntityCreated(int entity, const char[] classname)
+{
+	if( g_bWatchFire && strcmp(classname, "inferno") == 0 )
+	{
+		SDKHook(entity, SDKHook_SpawnPost, OnInfernoSpawned);
+	}
+}
+
+void OnInfernoSpawned(int entity)
+{
+	int client = GetEntPropEnt(entity, Prop_Data, "m_hOwnerEntity");
+
+	if( client > 0 && client <= MaxClients )
+	{
+		g_iInferno[entity] = client;
+	}
+}
+
+public Action L4D_Molotov_Detonate(int entity, int client)
+{
+	g_bWatchFire = true;
+	return Plugin_Continue;
+}
+
+public void L4D_Molotov_Detonate_Post(int entity, int client)
+{
+	g_bWatchFire = false;
+}
+
+public void L4D2_OnHitByVomitJar_Post(int victim, int attacker)
+{
+	g_iLastBombBile[victim] = attacker;
+	PrintToChatAll("biled %d %d", attacker, victim);
+}
+
+void OnTakeDamage(int victim, int attacker, int inflictor, float damage, int damagetype)
+{
+	if( damagetype & (DMG_BURN) )
+	{
+		if( inflictor > MaxClients && inflictor <= 2048 && g_iInferno[inflictor] == attacker )
+		{
+			g_iLastBombFire[victim] = attacker;
+		}
+	}
 }
 
 

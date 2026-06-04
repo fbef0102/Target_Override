@@ -83,7 +83,8 @@ enum TARGET_OPTION_INDEX
 	INDEX_SAFE		= 9,	// (int)	- "safe"
 	INDEX_TARGETED	= 10,	// (int)	- "targeted"
 	INDEX_RESCUE	= 11,	// (int)	- "rescue"
-	INDEX_RESCUEX	= 12	// (int)	- "rescuex"
+	INDEX_RESCUEX	= 12,	// (int)	- "rescuex"
+	INDEX_BOMBED	= 13	// (int)	- "bombed"
 }
 
 
