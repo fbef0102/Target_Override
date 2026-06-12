@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"2.32"
+#define PLUGIN_VERSION 		"2.33"
 #define DEBUG_BENCHMARK		0			// 0=Off. 1=Benchmark only (for command). 2=Benchmark (displays on server). 3=PrintToServer various data.
 
 /*======================================================================================
@@ -32,6 +32,9 @@
 
 ========================================================================================
 	Change Log:
+
+2.33 (12-Jun-2026)
+	- Fixed invalid address errors from the "rescue" option. Thanks to "liquidplasma".
 
 2.32 (04-Jun-2026)
 	- Added option "22" to target Survivors who molotov or bile bombed the attacker. Requested by "".
@@ -375,13 +378,6 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 		strcopy(error, err_max, "Plugin only supports Left 4 Dead 1 & 2.");
 		return APLRes_SilentFailure;
 	}
-
-	MarkNativeAsOptional("L4D_GetNavArea_SpawnAttributes");
-	MarkNativeAsOptional("L4D2Direct_GetFlowDistance");
-	MarkNativeAsOptional("L4D2Direct_GetTerrorNavArea");
-	MarkNativeAsOptional("L4D_NavArea_GetAdjacentAreas");
-	MarkNativeAsOptional("L4D2Direct_GetTerrorNavAreaFlow");
-	MarkNativeAsOptional("L4D_GetHighestFlowSurvivor");
 
 	CreateNative("L4D_TargetOverride_GetValue", Native_GetValue);
 	CreateNative("L4D_TargetOverride_GetOption", Native_GetOption);
@@ -1787,40 +1783,42 @@ MRESReturn ChooseVictim(int attacker, Handle hReturn)
 				GetClientAbsOrigin(victim, vArea);
 
 				Address navarea = L4D2Direct_GetTerrorNavArea(vArea);
-
-				if( g_iOptionResX[class] == 0 )
+				if( navarea )
 				{
-					if( navarea && L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE ) continue;
-				}
-				else
-				{
-					// Get adjacent areas:
-					ArrayList aList;
-					bool found;
-					int count;
-
-					for( int x = 0; x < 4; x++ )
+					if( g_iOptionResX[class] == 0 )
 					{
-						aList = new ArrayList();
-						count = L4D_NavArea_GetAdjacentAreas(navarea, x, aList);
+						if( L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE ) continue;
+					}
+					else
+					{
+						// Get adjacent areas:
+						ArrayList aList;
+						bool found;
+						int count;
 
-						for( int a = 0; a < count; a++ )
+						for( int x = 0; x < 4; x++ )
 						{
-							navarea = aList.Get(a);
-							if( navarea && L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE )
+							aList = new ArrayList();
+							count = L4D_NavArea_GetAdjacentAreas(navarea, x, aList);
+
+							for( int a = 0; a < count; a++ )
 							{
-								found = true;
-								delete aList;
-								break;
+								navarea = aList.Get(a);
+								if( navarea && L4D_GetNavArea_SpawnAttributes(navarea) & NAV_SPAWN_RESCUE_VEHICLE )
+								{
+									found = true;
+									delete aList;
+									break;
+								}
 							}
+
+							delete aList;
+
+							if( found ) break;
 						}
 
-						delete aList;
-
-						if( found ) break;
+						if( found ) continue;
 					}
-
-					if( found ) continue;
 				}
 			}
 
