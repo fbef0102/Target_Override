@@ -2670,7 +2670,6 @@ public void L4D_Molotov_Detonate_Post(int entity, int client)
 public void L4D2_OnHitByVomitJar_Post(int victim, int attacker)
 {
 	g_iLastBombBile[victim] = attacker;
-	PrintToChatAll("biled %d %d", attacker, victim);
 }
 
 void OnTakeDamage(int victim, int attacker, int inflictor, float damage, int damagetype)
